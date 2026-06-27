@@ -18,9 +18,16 @@ swapping (lean GPU), a safe agentic coding sandbox, and update-resilience.
    - **Ollama (`:11434`)** — fallback + variety models only.
 
 ## Coding (the "code specialist")
-A coding task is delegated to **OpenCode** (headless agentic harness: plan → edit
-files → run → read errors → fix). OpenCode drives **Ornith** via the proxy, and
-runs **inside** a `hermes-container` sandbox:
+> **Status: PARKED / planned — see [CODER_BACKEND.md](CODER_BACKEND.md).** Ornith is
+> registered + serving today, but the OpenCode harness is **not wired live**: Studio's
+> chat endpoint runs client-supplied tools *itself* (server-side, host-side), so it
+> can't host an external harness while its chat tools stay on. The design + the two
+> ways to finish it (Studio's own coder, or file-safe OpenCode on a separate
+> `llama-server`) are captured in that doc. The sandbox pieces below are built and ready.
+
+The intended design: a coding task is delegated to **OpenCode** (headless agentic
+harness: plan → edit files → run → read errors → fix). OpenCode drives **Ornith** via
+a raw `llama-server`, and runs **inside** a `hermes-container` sandbox:
 - **Sandbox** = `hermes-coder-sandbox` image: Python 3.12 + dev stack, **non-root
   (uid 1000)**, **no host filesystem** (only `/work`), memory/cpu/pids capped.
 - **`hermes-container`** = bounded docker wrapper. hermesbot has **no direct

@@ -54,6 +54,12 @@ idle-unloads it. So the generalist (Qwen 3.6 35B-A3B MTP) and the coding special
 - systemd units for both.
 
 ### `coder/` — agentic coding sandbox (the Hermes "code" specialist)
+> ⚠️ **Status: planned / parked — see [docs/CODER_BACKEND.md](docs/CODER_BACKEND.md).**
+> Ornith is registered + serving, but the OpenCode harness isn't wired live (Unsloth
+> Studio's chat endpoint runs client tools *itself*, so it can't host an external
+> harness while its chat tools stay on). These sandbox pieces are built and ready for
+> the file-safe path (OpenCode + this container + a separate raw `llama-server`).
+
 - **`hermes-container`** — a **bounded** docker lifecycle wrapper. hermesbot runs *only*
   this (via sudoers) and gets **no direct docker**: every op is fenced to containers
   labeled `hermes-coder.managed=1` — it can never touch ollama/litellm/comfyui/etc.
