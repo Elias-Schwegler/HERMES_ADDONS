@@ -1,0 +1,4 @@
+# Hermes coder platform — hermesbot may run ONLY the bounded hermes-container
+# wrapper as root. It gets NO direct docker access; the wrapper restricts every
+# operation to hermes-coder.managed containers (never ollama/litellm/comfyui/etc).
+hermesbot ALL=(root) NOPASSWD: /usr/local/bin/hermes-container

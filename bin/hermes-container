@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# hermes-container — bounded docker lifecycle for the Hermes coder platform.
+#
+# hermesbot runs this (and ONLY this) via sudo; it has NO direct docker access.
+# HARD SCOPE: every operation is restricted to containers we created, identified
+# by the label  hermes-coder.managed=1 . It can NEVER stop/rm/exec/inspect any
+# other container (ollama, hermes-litellm, comfyui, pid-upscale, lance, ...).
+# No arbitrary docker args, no host mounts beyond the project's own dir, no
+# privileged, non-root, resource-capped, on a dedicated network.
+#
+# Verbs: create|start|stop|rm|exec|logs|list|gc|deploy
+set -euo pipefail
+
+IMAGE="hermes-coder-sandbox:latest"
+NS="hermes-coder"                       # label namespace
+PREFIX="hermes-coder-"                  # container name prefix (also part of the fence)
+NET="hermes-coder-net"
+MEM="6g"; CPUS="4"; PIDS="512"
+DATA_ROOT="/home/hermesbot/.hermes/coder-projects"
+DEPLOY_LIST="/etc/hermes-coder/deployed.list"
+
+die(){ echo "hermes-container: $*" >&2; exit 2; }
+valid_project(){ [[ "${1:-}" =~ ^[a-z0-9][a-z0-9_-]{0,30}$ ]] || die "invalid project name: '${1:-}'"; }
+cname(){ printf '%s%s' "$PREFIX" "$1"; }
+
+# Refuse to act on anything that is not OURS. Checks the managed label AND the
+# name prefix — belt and suspenders. This is the security fence.
+assert_managed(){
+  local c="$1" lbl
+  case "$c" in "$PREFIX"*) : ;; *) die "refusing: '$c' is outside the hermes-coder namespace" ;; esac
+  lbl=$(docker inspect --format '{{index .Config.Labels "'"$NS"'.managed"}}' "$c" 2>/dev/null) \
+      || die "no such hermes-coder container: $c"
+  [ "$lbl" = "1" ] || die "refusing: '$c' is not a hermes-coder-managed container"
+}
+
+ensure_net(){ docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null; }
+
+verb="${1:-}"
+case "$verb" in
+  create)
+    valid_project "${2:-}"; p="$2"; c=$(cname "$p"); ensure_net
+    mkdir -p "$DATA_ROOT/$p"; chown -R 1000:1000 "$DATA_ROOT/$p" 2>/dev/null || chmod 0777 "$DATA_ROOT/$p"
+    # if a container by our name already exists, it must be ours before we replace it
+    if docker inspect "$c" >/dev/null 2>&1; then assert_managed "$c"; docker rm -f "$c" >/dev/null; fi
+    docker run -d --name "$c" \
+      --label "$NS.managed=1" --label "$NS.project=$p" --label "$NS.role=dev" \
+      --network "$NET" --add-host host.docker.internal:host-gateway \
+      --memory "$MEM" --cpus "$CPUS" --pids-limit "$PIDS" \
+      --security-opt no-new-privileges --restart no \
+      -v "$DATA_ROOT/$p:/work" -w /work \
+      "$IMAGE" sleep infinity >/dev/null
+    echo "created $c (role=dev)"
+    ;;
+  start) valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"; docker start "$c" >/dev/null; echo "started $c" ;;
+  stop)  valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"; docker stop "$c" >/dev/null; echo "stopped $c" ;;
+  rm)    valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"; docker rm -f "$c" >/dev/null; echo "removed $c" ;;
+  logs)  valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"; docker logs --tail "${3:-200}" "$c" ;;
+  exec)
+    valid_project "${2:-}"; p="$2"; c=$(cname "$p"); shift 2; assert_managed "$c"
+    [ "$#" -gt 0 ] || die "exec needs a command"
+    exec docker exec "$c" "$@"   # runs INSIDE the isolated sandbox
+    ;;
+  list)  docker ps -a --filter "label=$NS.managed=1" \
+           --format 'table {{.Names}}\t{{.Status}}\t{{index .Labels "'"$NS"'.role"}}' ;;
+  deploy)
+    valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"
+    mkdir -p "$(dirname "$DEPLOY_LIST")"; grep -qxF "$c" "$DEPLOY_LIST" 2>/dev/null || echo "$c" >> "$DEPLOY_LIST"
+    echo "marked $c deployed (exempt from gc)"
+    ;;
+  gc)
+    # remove role=dev managed containers NOT in the deploy list. Never touches non-managed.
+    docker ps -a --filter "label=$NS.managed=1" --filter "label=$NS.role=dev" --format '{{.Names}}' \
+    | while read -r c; do
+        [ -n "$c" ] || continue
+        grep -qxF "$c" "$DEPLOY_LIST" 2>/dev/null && continue
+        if assert_managed "$c" 2>/dev/null; then docker rm -f "$c" >/dev/null && echo "gc removed $c"; fi
+      done
+    ;;
+  *) die "usage: hermes-container {create|start|stop|rm|exec|logs|list|deploy|gc} <project> [args]" ;;
+esac
