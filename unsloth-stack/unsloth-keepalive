@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""
+unsloth-keepalive — Ollama-style idle auto-unload for Unsloth Studio.
+
+Watches the unsloth-studio.service journal for HTTP request_completed events
+and tracks two activity classes separately:
+  - external API (Hermes etc. via /v1/*)   → aggressive idle threshold
+  - UI traffic   (browser via /api/inference/{chat,generate}*) → permissive
+
+When BOTH timers exceed their idle thresholds AND the engine is not busy
+(no active generation/load/training), the loaded model is unloaded via
+POST /api/inference/unload. The model name is persisted to a state file
+so the companion auto-reload-proxy can re-load it on next external hit.
+
+Configuration via /etc/default/unsloth-keepalive (env vars):
+  STUDIO_API_KEY            — required, any valid Studio API key
+  STUDIO_BASE_URL           — default http://127.0.0.1:8888
+  EXTERNAL_IDLE_SECONDS     — default 600  (10 min)
+  UI_IDLE_SECONDS           — default 1800 (30 min)
+  CHECK_INTERVAL_SECONDS    — default 60
+  STATE_FILE                — default /run/unsloth-keepalive.state
+"""
+
+import json
+import logging
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    sys.exit("unsloth-keepalive needs 'requests' — install via apt (python3-requests) or pip")
+
+STUDIO_BASE = os.environ.get("STUDIO_BASE_URL", "http://127.0.0.1:8888")
+STUDIO_KEY = os.environ.get("STUDIO_API_KEY", "")
+EXTERNAL_IDLE = int(os.environ.get("EXTERNAL_IDLE_SECONDS", "600"))
+UI_IDLE = int(os.environ.get("UI_IDLE_SECONDS", "1800"))
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
+STATE_FILE = Path(os.environ.get("STATE_FILE", "/run/unsloth-keepalive.state"))
+SERVICE_UNIT = os.environ.get("STUDIO_SERVICE_UNIT", "unsloth-studio.service")
+
+EXTERNAL_PATH_PREFIXES = (
+    "/v1/chat/completions",
+    "/v1/messages",
+    "/v1/responses",
+    "/v1/completions",
+    "/v1/embeddings",
+)
+UI_PATH_PREFIXES = (
+    "/api/inference/chat/completions",
+    "/api/inference/generate",
+    "/api/inference/audio",
+    "/api/training",
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("unsloth-keepalive")
+
+
+def auth_headers():
+    return {"Authorization": f"Bearer {STUDIO_KEY}"} if STUDIO_KEY else {}
+
+
+def studio_status():
+    try:
+        r = requests.get(
+            f"{STUDIO_BASE}/api/inference/status",
+            headers=auth_headers(),
+            timeout=3,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception as e:
+        log.debug("status fetch failed: %s", e)
+    return None
+
+
+def is_busy(status):
+    if not status:
+        return False
+    return bool(
+        status.get("is_generating")
+        or status.get("is_training")
+        or status.get("loading")
+    )
+
+
+def active_model(status):
+    if not status:
+        return None
+    return status.get("active_model") or (status.get("loaded") or [None])[0]
+
+
+def write_state(model):
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(
+            json.dumps({"last_loaded": model, "updated": time.time()})
+        )
+    except Exception as e:
+        log.warning("state write failed: %s", e)
+
+
+def unload(model):
+    try:
+        r = requests.post(
+            f"{STUDIO_BASE}/api/inference/unload",
+            headers=auth_headers(),
+            json={"model_path": model},
+            timeout=20,
+        )
+        if r.status_code == 200:
+            return True
+        log.warning("unload returned %s: %s", r.status_code, r.text[:200])
+    except Exception as e:
+        log.warning("unload request failed: %s", e)
+    return False
+
+
+def categorize(path):
+    for p in EXTERNAL_PATH_PREFIXES:
+        if path.startswith(p):
+            return "external"
+    for p in UI_PATH_PREFIXES:
+        if path.startswith(p):
+            return "ui"
+    return "ignore"
+
+
+class State:
+    def __init__(self):
+        now = time.time()
+        self.last_external = now
+        self.last_ui = now
+        self.last_check = 0.0
+        self.last_logged_model = None
+
+
+def maybe_unload(state):
+    now = time.time()
+    ext_idle = now - state.last_external
+    ui_idle = now - state.last_ui
+
+    if ext_idle < EXTERNAL_IDLE or ui_idle < UI_IDLE:
+        return
+
+    status = studio_status()
+    model = active_model(status)
+    if not model:
+        return
+
+    # Remember model name for proxy auto-reload
+    if model != state.last_logged_model:
+        write_state(model)
+        state.last_logged_model = model
+
+    if is_busy(status):
+        log.info(
+            "idle (ext=%ds ui=%ds) but engine busy — postpone",
+            int(ext_idle),
+            int(ui_idle),
+        )
+        return
+
+    log.info(
+        "auto-unload %s (ext_idle=%ds, ui_idle=%ds)",
+        model,
+        int(ext_idle),
+        int(ui_idle),
+    )
+    if unload(model):
+        log.info("unload OK")
+        # Push timers forward so we don't re-trigger every 60s while still idle
+        state.last_external = now
+        state.last_ui = now
+
+
+def main():
+    if not STUDIO_KEY:
+        log.error("STUDIO_API_KEY is empty — set via /etc/default/unsloth-keepalive")
+        return 2
+
+    log.info(
+        "starting (base=%s ext_idle=%ds ui_idle=%ds check=%ds)",
+        STUDIO_BASE,
+        EXTERNAL_IDLE,
+        UI_IDLE,
+        CHECK_INTERVAL,
+    )
+
+    # Tail Studio service journal. -o cat strips the journal frame; Studio's
+    # structured logger writes pure JSON so we can parse line by line.
+    proc = subprocess.Popen(
+        [
+            "journalctl",
+            "-fu", SERVICE_UNIT,
+            "-o", "cat",
+            "--since", "now",
+            "-n", "0",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+
+    state = State()
+
+    def shutdown(_sig, _frm):
+        log.info("shutting down")
+        try:
+            proc.terminate()
+        finally:
+            sys.exit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    fd = proc.stdout.fileno()
+
+    while True:
+        # Block up to CHECK_INTERVAL for new journal lines; periodic check
+        # happens on timeout too.
+        rlist, _, _ = select.select([fd], [], [], CHECK_INTERVAL)
+        if rlist:
+            line = proc.stdout.readline()
+            if line:
+                line = line.strip()
+                if line.startswith("{") and "request_completed" in line:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        entry = None
+                    if entry and entry.get("event") == "request_completed":
+                        path = entry.get("path", "")
+                        cat = categorize(path)
+                        if cat == "external":
+                            state.last_external = time.time()
+                        elif cat == "ui":
+                            state.last_ui = time.time()
+        # Periodic check (independent of inbound traffic)
+        now = time.time()
+        if now - state.last_check >= CHECK_INTERVAL:
+            state.last_check = now
+            try:
+                maybe_unload(state)
+            except Exception as e:
+                log.exception("maybe_unload crashed: %s", e)
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

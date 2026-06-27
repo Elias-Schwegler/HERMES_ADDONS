@@ -1,0 +1,13 @@
+# Ephemeral coding sandbox for the Hermes coder (Ornith). Non-root, no host mounts
+# except a scratch /work. Common Python/dev stack pre-baked so most code runs offline.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git curl ca-certificates build-essential nodejs npm jq \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+      numpy pandas requests httpx flask fastapi uvicorn pydantic \
+      pytest rich matplotlib pillow beautifulsoup4 lxml python-dateutil
+RUN useradd -m -u 1000 coder
+USER coder
+WORKDIR /work
+CMD ["python3"]

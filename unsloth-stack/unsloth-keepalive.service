@@ -1,0 +1,23 @@
+[Unit]
+Description=Unsloth Studio idle auto-unload daemon
+After=unsloth-studio.service
+Wants=unsloth-studio.service
+PartOf=unsloth-studio.service
+
+[Service]
+RuntimeDirectory=unsloth-keepalive
+RuntimeDirectoryMode=0755
+Type=simple
+User=elias
+Group=elias
+EnvironmentFile=/etc/default/unsloth-keepalive
+ExecStart=/usr/local/bin/unsloth-keepalive
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+# Allow reading own user journal without root
+SupplementaryGroups=systemd-journal
+
+[Install]
+WantedBy=multi-user.target

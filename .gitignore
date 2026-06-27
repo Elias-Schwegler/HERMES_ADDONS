@@ -1,0 +1,31 @@
+# ── SECRETS — never commit (public repo) ────────────────────────────────
+.env
+*.env
+!*.env.example
+**/*secret*
+**/*.key
+**/*.pem
+**/auth.db
+**/.bootstrap_password
+# Real configs that hold API keys — only the *.example.* versions are committed
+litellm/config.yaml
+**/unsloth-keepalive.env
+config/opencode.json
+**/*.real.*
+
+# ── Heavy / machine artifacts ────────────────────────────────────────────
+*.gguf
+*.safetensors
+*.bin
+models/
+*.log
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.DS_Store
+
+# ── Project scratch ──────────────────────────────────────────────────────
+coder-projects/
+*.bak
+*.bak-*

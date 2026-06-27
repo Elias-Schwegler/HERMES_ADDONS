@@ -1,0 +1,19 @@
+[Unit]
+Description=Unsloth Studio auto-reload proxy (8889 -> 8888)
+After=unsloth-studio.service
+Wants=unsloth-studio.service
+PartOf=unsloth-studio.service
+
+[Service]
+Type=simple
+User=elias
+Group=elias
+EnvironmentFile=/etc/default/unsloth-keepalive
+ExecStart=/usr/local/bin/unsloth-autoreload-proxy
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

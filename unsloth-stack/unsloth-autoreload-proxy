@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+unsloth-autoreload-proxy — Ollama-style multi-model proxy in front of Unsloth Studio.
+
+Sits between Hermes (or any external OpenAI-compatible client) and Studio:
+
+  - GET  /v1/models             → returns a CURATED list of GGUF models the
+                                  user has downloaded (so Hermes' /model
+                                  dropdown shows them all, not just the
+                                  active one).
+
+  - POST /v1/chat/completions   → inspects the `model` field of the request;
+       /v1/messages              if it's a known model and Studio currently
+       /v1/responses             has a different one loaded, swaps Studio's
+       /v1/completions           model first, *then* forwards the request.
+
+  - Other paths                 → forwarded verbatim (streaming-safe).
+
+Configuration via /etc/default/unsloth-keepalive (shared with keepalive):
+  STUDIO_API_KEY               — required
+  STUDIO_BASE_URL              — default http://127.0.0.1:8888
+  PROXY_HOST                   — default 127.0.0.1
+  PROXY_PORT                   — default 8889
+  STATE_FILE                   — default /run/unsloth-keepalive/state.json
+  FALLBACK_MODEL               — used on cold start when state file empty
+  FALLBACK_GGUF_VARIANT        — variant for fallback
+  LOAD_TIMEOUT_SECONDS         — default 180
+  EXPOSED_MODELS               — comma-list of "model_path:variant" entries
+                                  surfaced via /v1/models. Example:
+                                    unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL,
+                                    unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL
+"""
+
+import asyncio
+import json
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
+try:
+    import aiohttp
+    from aiohttp import web
+except ImportError:
+    sys.exit("unsloth-autoreload-proxy needs 'aiohttp' — install via apt or pip")
+
+STUDIO_BASE = os.environ.get("STUDIO_BASE_URL", "http://127.0.0.1:8888").rstrip("/")
+STUDIO_KEY = os.environ.get("STUDIO_API_KEY", "")
+PROXY_HOST = os.environ.get("PROXY_HOST", "127.0.0.1")
+PROXY_PORT = int(os.environ.get("PROXY_PORT", "8889"))
+STATE_FILE = Path(os.environ.get("STATE_FILE", "/run/unsloth-keepalive/state.json"))
+FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF")
+FALLBACK_VARIANT = os.environ.get("FALLBACK_GGUF_VARIANT", "UD-Q4_K_XL")
+LOAD_TIMEOUT = int(os.environ.get("LOAD_TIMEOUT_SECONDS", "180"))
+EXPOSED_MODELS_RAW = os.environ.get("EXPOSED_MODELS", "")
+
+# Parse EXPOSED_MODELS: "repo/name:variant,repo/name2:variant2"
+EXPOSED = []
+for entry in EXPOSED_MODELS_RAW.split(","):
+    entry = entry.strip()
+    if not entry:
+        continue
+    if ":" in entry:
+        path, variant = entry.rsplit(":", 1)
+    else:
+        path, variant = entry, ""
+    EXPOSED.append({"model_path": path.strip(), "gguf_variant": variant.strip()})
+
+# Build a lookup by model_path for O(1) request routing
+BY_PATH = {m["model_path"]: m for m in EXPOSED}
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("unsloth-autoreload-proxy")
+
+load_lock: asyncio.Lock | None = None
+
+
+def auth_headers():
+    return {"Authorization": f"Bearer {STUDIO_KEY}"} if STUDIO_KEY else {}
+
+
+def desired_model():
+    """Pick a model for cold-start auto-load from state file or fallback."""
+    try:
+        data = json.loads(STATE_FILE.read_text())
+        m = data.get("last_loaded")
+        if m:
+            variant = BY_PATH.get(m, {}).get("gguf_variant", FALLBACK_VARIANT)
+            return m, variant
+    except Exception:
+        pass
+    return FALLBACK_MODEL, FALLBACK_VARIANT
+
+
+def write_state(model_path):
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(
+            json.dumps({"last_loaded": model_path, "updated": time.time()})
+        )
+    except Exception as e:
+        log.debug("state write failed: %s", e)
+
+
+async def studio_status(session):
+    try:
+        async with session.get(
+            f"{STUDIO_BASE}/api/inference/status",
+            headers=auth_headers(),
+            timeout=aiohttp.ClientTimeout(total=3),
+        ) as r:
+            if r.status == 200:
+                return await r.json()
+    except Exception as e:
+        log.debug("status fetch failed: %s", e)
+    return None
+
+
+async def studio_load(session, model_path, variant):
+    payload = {"model_path": model_path}
+    if variant:
+        payload["gguf_variant"] = variant
+    try:
+        async with session.post(
+            f"{STUDIO_BASE}/api/inference/load",
+            headers={**auth_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=LOAD_TIMEOUT),
+        ) as r:
+            if r.status == 200:
+                write_state(model_path)
+                return True
+            body = await r.text()
+            log.error("load %s failed %s: %s", model_path, r.status, body[:300])
+    except Exception as e:
+        log.error("load request crashed: %s", e)
+    return False
+
+
+async def ensure_model(session, requested_path):
+    """
+    Make sure Studio has *requested_path* loaded.
+
+    Returns:
+      True  — Studio is ready for inference with the requested model.
+      False — load failed; caller should return 503.
+    """
+    assert load_lock is not None
+    async with load_lock:
+        st = await studio_status(session)
+        active = st.get("active_model") if st else None
+
+        if active == requested_path and not (st or {}).get("loading"):
+            return True  # already loaded
+
+        # Either nothing loaded, wrong model loaded, or still loading something
+        variant = (
+            BY_PATH.get(requested_path, {}).get("gguf_variant") or FALLBACK_VARIANT
+        )
+        if active and active != requested_path:
+            log.info("switching %s → %s", active, requested_path)
+        else:
+            log.info("loading %s (cold start)", requested_path)
+        return await studio_load(session, requested_path, variant)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Route handlers
+# ────────────────────────────────────────────────────────────────────────
+
+async def handle_models_list(request):
+    """GET /v1/models — return curated list (Ollama-style)."""
+    now = int(time.time())
+    data = [
+        {
+            "id": m["model_path"],
+            "object": "model",
+            "owned_by": "unsloth-studio",
+            "created": now,
+        }
+        for m in EXPOSED
+    ]
+    # If nothing curated, fall through to Studio's actual list
+    if not data:
+        session = request.app["session"]
+        try:
+            async with session.get(
+                f"{STUDIO_BASE}/v1/models",
+                headers=auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as r:
+                payload = await r.json()
+                return web.json_response(payload)
+        except Exception:
+            return web.json_response({"object": "list", "data": []})
+    return web.json_response({"object": "list", "data": data})
+
+
+async def handle_v1_request(request):
+    """
+    POST /v1/{chat/completions,messages,responses,completions,embeddings}
+    — inspect `model` field, swap Studio's loaded model if needed, forward.
+    """
+    session = request.app["session"]
+
+    body_bytes = await request.read()
+    requested_model = None
+    if body_bytes:
+        try:
+            body_json = json.loads(body_bytes)
+            requested_model = body_json.get("model")
+        except Exception:
+            body_json = None
+    else:
+        body_json = None
+
+    # If the requested model is in our curated list, ensure Studio has it loaded.
+    if requested_model and requested_model in BY_PATH:
+        ok = await ensure_model(session, requested_model)
+        if not ok:
+            return web.json_response(
+                {"error": {"message": f"failed to load {requested_model}"}},
+                status=503,
+            )
+    elif requested_model is None:
+        # No model field — make sure SOMETHING is loaded
+        st = await studio_status(session)
+        if not st or not st.get("active_model"):
+            target, variant = desired_model()
+            log.info("cold studio — auto-loading %s", target)
+            ok = await ensure_model(session, target)
+            if not ok:
+                return web.json_response(
+                    {"error": {"message": "auto-reload failed"}}, status=503
+                )
+
+    return await forward(request, body_bytes)
+
+
+async def forward(request, body_bytes=None):
+    """Generic forward to Studio (streaming-safe)."""
+    session = request.app["session"]
+    upstream_url = f"{STUDIO_BASE}{request.rel_url}"
+    skip = {"host", "content-length", "connection", "accept-encoding"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
+
+    if body_bytes is None:
+        body_bytes = await request.read()
+
+    async def do_forward():
+        return await session.request(
+            request.method,
+            upstream_url,
+            headers=headers,
+            data=body_bytes if body_bytes else None,
+            allow_redirects=False,
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10),
+        )
+
+    upstream = await do_forward()
+
+    # Studio might return 400 "no model loaded" if we missed the gate above
+    if upstream.status in (400, 503):
+        text = ""
+        try:
+            text = (await upstream.text()).lower()
+        except Exception:
+            pass
+        await upstream.release()
+        if "no model loaded" in text:
+            log.info("late cold-detect — autoloading fallback")
+            target, _ = desired_model()
+            ok = await ensure_model(session, target)
+            if not ok:
+                return web.Response(status=503, text="auto-reload failed")
+            upstream = await do_forward()
+
+    resp = web.StreamResponse(
+        status=upstream.status,
+        headers={
+            k: v
+            for k, v in upstream.headers.items()
+            if k.lower() not in {"content-encoding", "transfer-encoding", "connection"}
+        },
+    )
+    await resp.prepare(request)
+    try:
+        async for chunk in upstream.content.iter_any():
+            await resp.write(chunk)
+    finally:
+        await resp.write_eof()
+        upstream.release()
+    return resp
+
+
+async def catch_all(request):
+    """Default route — forward any non-/v1/* request to Studio verbatim."""
+    return await forward(request)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# App setup
+# ────────────────────────────────────────────────────────────────────────
+
+async def on_startup(app):
+    app["session"] = aiohttp.ClientSession()
+    global load_lock
+    load_lock = asyncio.Lock()
+    log.info("listening on http://%s:%d → %s", PROXY_HOST, PROXY_PORT, STUDIO_BASE)
+    if EXPOSED:
+        log.info("exposing %d models via /v1/models:", len(EXPOSED))
+        for m in EXPOSED:
+            log.info("  - %s (variant=%s)", m["model_path"], m["gguf_variant"] or "default")
+    else:
+        log.warning("EXPOSED_MODELS empty — proxy will pass through Studio's /v1/models")
+
+
+async def on_cleanup(app):
+    await app["session"].close()
+
+
+def main():
+    if not STUDIO_KEY:
+        log.error("STUDIO_API_KEY missing — set via /etc/default/unsloth-keepalive")
+        return 2
+    app = web.Application(client_max_size=512 * 1024 * 1024)
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+
+    # Specific routes first
+    app.router.add_get("/v1/models", handle_models_list)
+    for path in (
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "/v1/completions",
+        "/v1/embeddings",
+    ):
+        app.router.add_post(path, handle_v1_request)
+    # Catch-all for everything else
+    app.router.add_route("*", "/{path:.*}", catch_all)
+
+    web.run_app(app, host=PROXY_HOST, port=PROXY_PORT, access_log=None)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

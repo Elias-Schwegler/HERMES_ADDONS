@@ -1,0 +1,90 @@
+# LiteLLM router for Hermes Agent Gateway
+#
+# Sits between Hermes and the two local LLM backends (Unsloth Studio, Ollama)
+# so Hermes only ever talks to ONE base_url (http://127.0.0.1:4002/v1) and
+# routes by `model:` field in the request. No port-hardcoding, no broken
+# integration when Studio re-spawns its llama-server on a different ephemeral
+# port.
+#
+# Routing key = `model_name`. Hermes references these in its config.yaml.
+
+model_list:
+
+  # Default: Unsloth Studio with MTP speculative decoding (fastest)
+  # NOTE: Studio's autoreload-proxy always returns SSE — even for stream:false
+  # requests. We force stream:true upstream so LiteLLM can aggregate to JSON
+  # when needed.
+  - model_name: unsloth-qwen3.6-35b-3ba-mtp
+    litellm_params:
+      model: openai/unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+      api_base: http://127.0.0.1:8889/v1   # autoreload-proxy
+      api_key: sk-unsloth-REPLACE_ME
+      stream: true
+
+  # Smaller Unsloth MTP — same speedup tech, smaller footprint
+  - model_name: unsloth-qwen3.6-27b-mtp
+    litellm_params:
+      model: openai/unsloth/Qwen3.6-27B-MTP-GGUF
+      api_base: http://127.0.0.1:8889/v1   # autoreload-proxy
+      api_key: sk-unsloth-REPLACE_ME
+      stream: true
+
+  # Coding specialist: Ornith-1.0-35B (agentic coding / SWE-bench 75.6) via the
+  # Unsloth Studio autoreload-proxy — Studio swaps to it on demand, keepalive
+  # idle-unloads it. NO Ollama. The generalist delegates coding tasks here.
+  - model_name: unsloth-ornith-35b
+    litellm_params:
+      model: openai/deepreinforce-ai/Ornith-1.0-35B-GGUF
+      api_base: http://127.0.0.1:8889/v1   # unsloth-autoreload-proxy → Studio
+      api_key: sk-unsloth-REPLACE_ME
+      stream: true
+
+  # Stable fallback: same model class via Ollama, no MTP but robust
+  - model_name: ollama-qwen3.6-35b-3ba-180k
+    litellm_params:
+      model: openai/qwen3.6-35b-3ba-180k:latest
+      api_base: http://127.0.0.1:11434/v1
+      api_key: ollama-dummy
+
+  # Smaller/faster dense Qwen3.6 for short prompts
+  - model_name: ollama-qwen3.6-27b-180k
+    litellm_params:
+      model: openai/qwen3.6-27b-180k:latest
+      api_base: http://127.0.0.1:11434/v1
+      api_key: ollama-dummy
+
+  # Variety: Gemma 4 (different family / different strengths)
+  - model_name: ollama-gemma4-26b-180k
+    litellm_params:
+      model: openai/gemma4-26b-180k:latest
+      api_base: http://127.0.0.1:11434/v1
+      api_key: ollama-dummy
+
+  # Variety: Nemotron 3 (NVIDIA's tune)
+  - model_name: ollama-nemotron3-33b-128k
+    litellm_params:
+      model: openai/nemotron3-33b-128k:latest
+      api_base: http://127.0.0.1:11434/v1
+      api_key: ollama-dummy
+
+# Automatic fallback chain: if a model returns an error, try these in order.
+# Unsloth → Ollama-equivalent keeps Telegram working when Studio chokes.
+router_settings:
+  fallbacks:
+    - unsloth-qwen3.6-35b-3ba-mtp: [ollama-qwen3.6-35b-3ba-180k]
+    - unsloth-qwen3.6-27b-mtp: [ollama-qwen3.6-27b-180k]
+  num_retries: 2
+  timeout: 600                # seconds (large for cold-start auto-loads)
+  allowed_fails: 1
+  cooldown_time: 30
+
+litellm_settings:
+  drop_params: true           # strip any caller params the backend doesn't know
+  request_timeout: 600
+  set_verbose: false
+  json_logs: true
+
+general_settings:
+  master_key: sk-litellm-REPLACE_ME
+  # No DB — keep it stateless and simple. Add database_url later if usage
+  # tracking / per-user keys are needed.

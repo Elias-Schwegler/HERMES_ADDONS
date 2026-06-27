@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "unsloth": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Unsloth Studio (proxy :8889)",
+      "options": {
+        "baseURL": "http://localhost:8889/v1",
+        "apiKey": "sk-unsloth-REPLACE_ME"
+      },
+      "models": {
+        "deepreinforce-ai/Ornith-1.0-35B-GGUF": { "name": "Ornith 1.0 35B · coding specialist (Q5_K_M)", "limit": { "context": 131072, "output": 16384 } },
+        "unsloth/Qwen3.6-35B-A3B-MTP-GGUF":      { "name": "Qwen 3.6 35B-A3B MTP · generalist", "limit": { "context": 131072, "output": 16384 } },
+        "unsloth/Qwen3.6-27B-MTP-GGUF":          { "name": "Qwen 3.6 27B MTP", "limit": { "context": 131072, "output": 16384 } }
+      }
+    },
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local, variety models)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "qwen3.6-35b-3ba-128k":  { "name": "Qwen 3.6 35B-A3B (MoE) · 128k", "limit": { "context": 131072, "output": 16384 } },
+        "qwen3.6-35b-3ba-256k":  { "name": "Qwen 3.6 35B-A3B (MoE) · 256k (max)", "limit": { "context": 262144, "output": 16384 } },
+        "qwen3.6-27b-128k":      { "name": "Qwen 3.6 27B (dense) · 128k", "limit": { "context": 131072, "output": 16384 } },
+        "nemotron3-33b-128k":    { "name": "Nemotron 3 33B (hybrid) · 128k", "limit": { "context": 131072, "output": 16384 } },
+        "gemma4-26b-128k":       { "name": "Gemma 4 26B-A4B (MoE) · 128k", "limit": { "context": 131072, "output": 16384 } },
+        "gemma4-26b-256k":       { "name": "Gemma 4 26B-A4B (MoE) · 256k (max)", "limit": { "context": 262144, "output": 16384 } }
+      }
+    }
+  },
+  "model": "unsloth/deepreinforce-ai/Ornith-1.0-35B-GGUF"
+}

@@ -38,13 +38,13 @@ ensure_net(){ docker network inspect "$NET" >/dev/null 2>&1 || docker network cr
 verb="${1:-}"
 case "$verb" in
   create)
-    valid_project "${2:-}"; p="$2"; c=$(cname "$p"); ensure_net
+    valid_project "${2:-}"; p="$2"; c=$(cname "$p")
     mkdir -p "$DATA_ROOT/$p"; chown -R 1000:1000 "$DATA_ROOT/$p" 2>/dev/null || chmod 0777 "$DATA_ROOT/$p"
     # if a container by our name already exists, it must be ours before we replace it
     if docker inspect "$c" >/dev/null 2>&1; then assert_managed "$c"; docker rm -f "$c" >/dev/null; fi
     docker run -d --name "$c" \
       --label "$NS.managed=1" --label "$NS.project=$p" --label "$NS.role=dev" \
-      --network "$NET" --add-host host.docker.internal:host-gateway \
+      --network bridge --add-host host.docker.internal:host-gateway \
       --memory "$MEM" --cpus "$CPUS" --pids-limit "$PIDS" \
       --security-opt no-new-privileges --restart no \
       -v "$DATA_ROOT/$p:/work" -w /work \
@@ -61,7 +61,7 @@ case "$verb" in
     exec docker exec "$c" "$@"   # runs INSIDE the isolated sandbox
     ;;
   list)  docker ps -a --filter "label=$NS.managed=1" \
-           --format 'table {{.Names}}\t{{.Status}}\t{{index .Labels "'"$NS"'.role"}}' ;;
+           --format 'table {{.Names}}\t{{.Status}}\t{{.Label "'"$NS"'.role"}}' ;;
   deploy)
     valid_project "${2:-}"; c=$(cname "$2"); assert_managed "$c"
     mkdir -p "$(dirname "$DEPLOY_LIST")"; grep -qxF "$c" "$DEPLOY_LIST" 2>/dev/null || echo "$c" >> "$DEPLOY_LIST"
