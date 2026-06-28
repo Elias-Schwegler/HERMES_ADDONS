@@ -52,6 +52,13 @@ EXTERNAL_PATH_PREFIXES = (
     "/v1/embeddings",
 )
 UI_PATH_PREFIXES = (
+    # Studio's browser chat (current paths) — browser-only (Hermes never hits these)
+    # and interaction-driven, not polled, so they correctly mean "user is actively
+    # chatting" and keep the model loaded. Without these the browser chat is seen as
+    # external (aggressive 600s) and the model unloads mid-session. The /api/inference/*
+    # paths below are older Studio versions, kept for back-compat.
+    "/api/chat/threads",
+    "/api/chat/projects",
     "/api/inference/chat/completions",
     "/api/inference/generate",
     "/api/inference/audio",
