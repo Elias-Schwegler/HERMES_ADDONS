@@ -17,6 +17,10 @@
 #   gc                reap idle dev sandboxes (delegates to hermes-container gc)
 set -uo pipefail
 
+# Self-escalate: Hermes (hermesbot) calls us bare via command_allowlist; re-exec as
+# root through the NOPASSWD sudoers rule. Skipped when already root (e.g. `sudo hermes-coder`).
+if [ "$(id -u)" -ne 0 ]; then exec sudo -n /usr/local/bin/hermes-coder "$@"; fi
+
 HC="${HERMES_CONTAINER:-/usr/local/bin/hermes-container}"
 DATA_ROOT="${DATA_ROOT:-/home/hermesbot/.hermes/coder-projects}"
 SHARE="${HERMES_CODER_SHARE:-/usr/local/share/hermes-coder}"
@@ -31,7 +35,8 @@ pdir(){ echo "$DATA_ROOT/$1"; }
 ensure_model(){
   curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0   # already serving
   systemctl is-active --quiet "$LLAMA_SVC" 2>/dev/null || systemctl start "$LLAMA_SVC" 2>/dev/null || true
-  local i; for i in $(seq 1 60); do
+  # cold start reads a ~25GB GGUF from disk — allow up to ~5min on a cold cache
+  local i; for i in $(seq 1 150); do
     curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0; sleep 2
   done
   die "coder model ($LLAMA_SVC) did not become ready"

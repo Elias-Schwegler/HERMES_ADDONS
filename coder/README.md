@@ -56,4 +56,6 @@ clean `tool_calls` that OpenCode runs **in our sandbox**. See [../docs/CODER_BAC
   reachability; chromium screenshot. UI vision-validate uses Ollama qwen3.6 vision.
 
 ## Install
-`sudo bash install.sh`, then wire Hermes (see `hermes-skill-code.md`).
+`sudo bash install.sh` — deploys scripts/assets/gates/vision/service/sudoers, builds the
+image, **and wires Hermes** (adds `hermes-coder` to the allowlist + installs the `/code`
+skill from `skill/SKILL.md` + restarts the gateway). Idempotent, backs up the config.
