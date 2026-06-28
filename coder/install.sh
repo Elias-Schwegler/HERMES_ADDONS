@@ -19,8 +19,9 @@ echo "[3] bounded sudoers (hermesbot -> ONLY hermes-container + hermes-coder)"
 install -m 440 "$HERE/hermes-coder.sudoers" /etc/sudoers.d/hermes-coder
 visudo -cf /etc/sudoers.d/hermes-coder
 
-echo "[4] coder model unit -> ornith-coder.service (raw llama-server, clean tool_calls)"
+echo "[4] coder model unit -> ornith-coder.service (raw llama-server, clean tool_calls) + OOM-guard config"
 install -m 644 "$HERE/ornith-coder.service" /etc/systemd/system/ornith-coder.service
+[ -f /etc/default/hermes-coder ] || install -m 644 "$HERE/hermes-coder.env.example" /etc/default/hermes-coder
 systemctl daemon-reload
 
 echo "[5] deploy-list (gc keep-list)"

@@ -21,6 +21,10 @@ set -uo pipefail
 # root through the NOPASSWD sudoers rule. Skipped when already root (e.g. `sudo hermes-coder`).
 if [ "$(id -u)" -ne 0 ]; then exec sudo -n /usr/local/bin/hermes-coder "$@"; fi
 
+# Optional config (sudo-safe — env vars are stripped by sudo, a sourced file is not).
+# Set CODER_MIN_AVAIL_GB to tune the OOM-guard threshold.
+[ -r /etc/default/hermes-coder ] && . /etc/default/hermes-coder
+
 HC="${HERMES_CONTAINER:-/usr/local/bin/hermes-container}"
 DATA_ROOT="${DATA_ROOT:-/home/hermesbot/.hermes/coder-projects}"
 SHARE="${HERMES_CODER_SHARE:-/usr/local/share/hermes-coder}"
@@ -34,7 +38,18 @@ pdir(){ echo "$DATA_ROOT/$1"; }
 
 ensure_model(){
   curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0   # already serving
-  systemctl is-active --quiet "$LLAMA_SVC" 2>/dev/null || systemctl start "$LLAMA_SVC" 2>/dev/null || true
+  if ! systemctl is-active --quiet "$LLAMA_SVC" 2>/dev/null; then
+    # OOM GUARD: refuse to load if there isn't room (the model needs ~30GB). On this
+    # unified-memory box an over-commit can cascade past the offender, so we fail
+    # closed and keep the system stable instead of loading.
+    local need avail
+    need="${CODER_MIN_AVAIL_GB:-34}"
+    avail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo 2>/dev/null)
+    if [ "${avail:-0}" -lt "$need" ]; then
+      die "not enough memory to load the coder model safely: ${avail:-?}GB available, need ~${need}GB. Free some up (close ComfyUI / unload a Studio model / let the friend's model idle out) and retry."
+    fi
+    systemctl start "$LLAMA_SVC" 2>/dev/null || true
+  fi
   # cold start reads a ~25GB GGUF from disk — allow up to ~5min on a cold cache
   local i; for i in $(seq 1 150); do
     curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0; sleep 2

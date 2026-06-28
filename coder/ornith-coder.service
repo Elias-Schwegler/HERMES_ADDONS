@@ -17,6 +17,14 @@ ExecStart=/bin/bash -lc '/home/elias/.unsloth/llama.cpp/llama-server \
   --alias ornith-coder --no-webui'
 Restart=on-failure
 RestartSec=5
+# OOM containment: if memory ever runs short, the kernel kills THIS service first
+# (high OOM score), and systemd stops it cleanly — protecting the friend's Ollama
+# and the rest of the host from a unified-memory OOM cascade. hermes-coder also
+# refuses to start it unless ~34GB is available (fail-closed pre-flight).
+OOMScoreAdjust=900
+OOMPolicy=kill
+MemoryHigh=36G
+MemoryMax=44G
 # Lifecycle: started on demand by `hermes-coder` when a coding session opens,
 # stopped when the last session finishes / goes idle (keeps the GPU free).
 
