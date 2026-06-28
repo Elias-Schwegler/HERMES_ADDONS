@@ -1,4 +1,6 @@
-# Hermes coder platform — hermesbot may run ONLY the bounded hermes-container
-# wrapper as root. It gets NO direct docker access; the wrapper restricts every
-# operation to hermes-coder.managed containers (never ollama/litellm/comfyui/etc).
-hermesbot ALL=(root) NOPASSWD: /usr/local/bin/hermes-container
+# Hermes coder platform — what hermesbot may run as root (and ONLY these).
+# It gets NO direct docker access. hermes-container restricts every op to
+# hermes-coder.managed containers (never ollama/litellm/comfyui/etc).
+# hermes-coder is the session orchestrator; running as root it manages the
+# ornith-coder.service llama-server and drives hermes-container internally.
+hermesbot ALL=(root) NOPASSWD: /usr/local/bin/hermes-container, /usr/local/bin/hermes-coder

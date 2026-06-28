@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# hermes-coder — coding-session orchestration for the Hermes agent.
+#
+# The Hermes/Qwen MANAGER drives this. It runs the CODER (Ornith via OpenCode)
+# inside the bounded hermes-container sandbox, enforces TDD + anti-stub gates, then
+# runs/presents the result. hermesbot runs this via sudo (see hermes-coder.sudoers);
+# it still has NO direct docker — every container op goes through hermes-container.
+#
+# Verbs:
+#   new <p> "<goal>"  start a session: model up, sandbox created, spec.md written
+#   plan <p>          coder writes a granular, test-first PLAN.md (no impl yet)
+#   implement <p>     coder runs the TDD build loop until RESULT=PASS
+#   status <p>        PLAN.md + file list (cheap, for the manager to read)
+#   review <p>        SUPERVISOR GATE: static anti-stub (host) + run suite (sandbox)
+#   ask <p> "<text>"  send a correction/instruction to the coder
+#   finish <p>        stop the model if idle; container kept (use gc to reap)
+#   gc                reap idle dev sandboxes (delegates to hermes-container gc)
+set -uo pipefail
+
+HC="${HERMES_CONTAINER:-/usr/local/bin/hermes-container}"
+DATA_ROOT="${DATA_ROOT:-/home/hermesbot/.hermes/coder-projects}"
+SHARE="${HERMES_CODER_SHARE:-/usr/local/share/hermes-coder}"
+LLAMA_SVC="ornith-coder.service"
+HEALTH="http://172.17.0.1:8890/health"
+PROJ_RE='^[a-z0-9][a-z0-9_-]{0,30}$'
+
+die(){ echo "hermes-coder: $*" >&2; exit 2; }
+vp(){ [[ "${1:-}" =~ $PROJ_RE ]] || die "invalid project: '${1:-}'"; }
+pdir(){ echo "$DATA_ROOT/$1"; }
+
+ensure_model(){
+  curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0   # already serving
+  systemctl is-active --quiet "$LLAMA_SVC" 2>/dev/null || systemctl start "$LLAMA_SVC" 2>/dev/null || true
+  local i; for i in $(seq 1 60); do
+    curl -s -m3 "$HEALTH" 2>/dev/null | grep -q ok && return 0; sleep 2
+  done
+  die "coder model ($LLAMA_SVC) did not become ready"
+}
+
+# run opencode headless inside the project's sandbox container
+ocrun(){ local p="$1" prompt="$2"; "$HC" exec "$p" env HOME=/work opencode run "$prompt"; }
+
+verb="${1:-}"
+case "$verb" in
+  new)
+    vp "${2:-}"; p="$2"; goal="${3:-}"
+    [ -n "$goal" ] || die "usage: new <project> \"<goal>\""
+    ensure_model
+    "$HC" create "$p" >/dev/null
+    d="$(pdir "$p")"
+    install -m 0644 "$SHARE/AGENTS.md" "$d/AGENTS.md"
+    install -m 0644 "$SHARE/opencode.coder.json" "$d/opencode.json"
+    cat > "$d/spec.md" <<EOF
+# Spec
+$goal
+
+## Acceptance criteria
+- All behavior covered by passing tests (TDD, test-first).
+- No stubs, no fake tests (the supervisor gate enforces this).
+EOF
+    chown -R 1000:1000 "$d" 2>/dev/null || chmod -R 0777 "$d"
+    echo "session '$p' ready (model up, sandbox created, spec written)"
+    ;;
+
+  plan)
+    vp "${2:-}"; p="$2"; ensure_model
+    ocrun "$p" "Read spec.md and AGENTS.md in this directory. Write a granular, method-level PLAN.md: ONE behavior/method per step, test-first. Do NOT implement yet — only write PLAN.md."
+    ;;
+
+  implement)
+    vp "${2:-}"; p="$2"; ensure_model
+    ocrun "$p" "Implement this project following PLAN.md and AGENTS.md strictly: test-first, one granular step at a time, run the full test suite after each step, NEVER leave stubs. Continue until every step is done and the whole suite is green, then output exactly RESULT=PASS on the last line."
+    ;;
+
+  ask)
+    vp "${2:-}"; p="$2"; msg="${3:-}"; [ -n "$msg" ] || die "usage: ask <project> \"<instruction>\""
+    ensure_model; ocrun "$p" "$msg"
+    ;;
+
+  status)
+    vp "${2:-}"; p="$2"; d="$(pdir "$p")"
+    echo "=== PLAN.md ==="; cat "$d/PLAN.md" 2>/dev/null || echo "(no plan yet)"
+    echo "=== files ==="; ls -1 "$d" 2>/dev/null | grep -vE '^\.(npm|cache|config|local|pytest_cache)$|^opencode\.json$'
+    ;;
+
+  review)
+    # SUPERVISOR GATE. Static anti-stub runs on the HOST (AST only, no code exec).
+    # The test suite runs INSIDE the sandbox (isolated execution).
+    vp "${2:-}"; p="$2"; d="$(pdir "$p")"
+    echo "=== anti-stub gate (static, host) ==="
+    ( cd "$d" && python3 "$SHARE/gates/check_no_stubs.py" ); gate=$?
+    echo "=== test suite (in sandbox) ==="
+    "$HC" exec "$p" env HOME=/work bash -lc 'cd /work && { python3 -m pytest -q 2>/dev/null && exit 0; rc=$?; ls test_*.py *_test.py >/dev/null 2>&1 || { echo "no tests"; exit 1; }; for t in test_*.py *_test.py; do [ -f "$t" ] && { python3 "$t" || exit 1; }; done; }'
+    tests=$?
+    echo "=== verdict ==="
+    if [ "$gate" -eq 0 ] && [ "$tests" -eq 0 ]; then echo "REVIEW=PASS"; else echo "REVIEW=FAIL (anti_stub=$gate tests=$tests)"; exit 1; fi
+    ;;
+
+  finish)
+    vp "${2:-}"; p="$2"
+    # stop the model if no dev sandboxes are still running
+    running=$("$HC" list 2>/dev/null | grep -c 'Up ' || true)
+    [ "${running:-0}" -le 1 ] && systemctl stop "$LLAMA_SVC" 2>/dev/null && echo "model stopped (idle)" || echo "model kept (other sessions active)"
+    echo "session '$p' finished (sandbox kept; 'gc' to reap, 'run' to deploy)"
+    ;;
+
+  gc) "$HC" gc ;;
+
+  *) die "usage: hermes-coder {new|plan|implement|ask|status|review|finish|gc} <project> [args]" ;;
+esac

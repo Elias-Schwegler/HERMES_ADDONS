@@ -16,8 +16,11 @@ NS="hermes-coder"                       # label namespace
 PREFIX="hermes-coder-"                  # container name prefix (also part of the fence)
 NET="hermes-coder-net"
 MEM="6g"; CPUS="4"; PIDS="512"
-DATA_ROOT="/home/hermesbot/.hermes/coder-projects"
-DEPLOY_LIST="/etc/hermes-coder/deployed.list"
+DATA_ROOT="${DATA_ROOT:-/home/hermesbot/.hermes/coder-projects}"
+DEPLOY_LIST="${DEPLOY_LIST:-/etc/hermes-coder/deployed.list}"
+# OpenCode binary mounted read-only into the sandbox (update-safe: uses the host's
+# copy, so updating OpenCode needs no image rebuild). Override via $OPENCODE_BIN.
+OPENCODE_BIN="${OPENCODE_BIN:-/home/elias/.opencode/bin/opencode}"
 
 die(){ echo "hermes-container: $*" >&2; exit 2; }
 valid_project(){ [[ "${1:-}" =~ ^[a-z0-9][a-z0-9_-]{0,30}$ ]] || die "invalid project name: '${1:-}'"; }
@@ -42,11 +45,13 @@ case "$verb" in
     mkdir -p "$DATA_ROOT/$p"; chown -R 1000:1000 "$DATA_ROOT/$p" 2>/dev/null || chmod 0777 "$DATA_ROOT/$p"
     # if a container by our name already exists, it must be ours before we replace it
     if docker inspect "$c" >/dev/null 2>&1; then assert_managed "$c"; docker rm -f "$c" >/dev/null; fi
+    oc_mount=(); [ -f "$OPENCODE_BIN" ] && oc_mount=(-v "$OPENCODE_BIN:/usr/local/bin/opencode:ro")
     docker run -d --name "$c" \
       --label "$NS.managed=1" --label "$NS.project=$p" --label "$NS.role=dev" \
       --network bridge --add-host host.docker.internal:host-gateway \
       --memory "$MEM" --cpus "$CPUS" --pids-limit "$PIDS" \
       --security-opt no-new-privileges --restart no \
+      "${oc_mount[@]}" \
       -v "$DATA_ROOT/$p:/work" -w /work \
       "$IMAGE" sleep infinity >/dev/null
     echo "created $c (role=dev)"
