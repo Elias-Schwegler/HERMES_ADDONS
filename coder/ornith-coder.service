@@ -1,0 +1,24 @@
+[Unit]
+# Raw llama-server serving Ornith for the OpenCode coder harness.
+# Separate from Unsloth Studio ON PURPOSE: Studio's chat endpoint executes
+# client-supplied tools itself (tool_status), which breaks an external agent
+# harness. A raw llama-server with --jinja returns clean OpenAI tool_calls that
+# OpenCode executes inside the sandbox. See docs/CODER_BACKEND.md.
+Description=Ornith 1.0-35B coder model (raw llama-server, clean tool_calls for OpenCode)
+After=network.target docker.service
+
+[Service]
+User=elias
+# Bind to the docker bridge gateway: reachable from sandbox containers
+# (host.docker.internal) but NOT exposed on the LAN.
+ExecStart=/bin/bash -lc '/home/elias/.unsloth/llama.cpp/llama-server \
+  --model "$(ls /home/elias/.cache/huggingface/hub/models--deepreinforce-ai--Ornith-1.0-35B-GGUF/snapshots/*/ornith-1.0-35b-Q5_K_M.gguf | head -1)" \
+  --host 172.17.0.1 --port 8890 --jinja --ctx-size 32768 -ngl 999 \
+  --alias ornith-coder --no-webui'
+Restart=on-failure
+RestartSec=5
+# Lifecycle: started on demand by `hermes-coder` when a coding session opens,
+# stopped when the last session finishes / goes idle (keeps the GPU free).
+
+[Install]
+WantedBy=multi-user.target

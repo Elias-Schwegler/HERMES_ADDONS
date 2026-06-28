@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ornith": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ornith (raw llama-server)",
+      "options": {
+        "baseURL": "http://host.docker.internal:8890/v1",
+        "apiKey": "sk-local-no-auth"
+      },
+      "models": {
+        "ornith-coder": {
+          "name": "Ornith 1.0 35B (coder)",
+          "tools": true,
+          "limit": { "context": 32768, "output": 8192 }
+        }
+      }
+    }
+  },
+  "model": "ornith/ornith-coder",
+  "permission": { "edit": "allow", "bash": "allow" }
+}
