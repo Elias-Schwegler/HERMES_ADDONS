@@ -1,8 +1,15 @@
 # Coder backend — status, finding & decision (the "code specialist")
 
-> **Status: PARKED (design captured, pieces built — not wired live).**
-> This records *why*, what was found, and the two ways to finish it, so nobody
-> re-investigates from scratch. Last updated 2026-06-27.
+> **Status: Option A CONFIRMED WORKING (2026-06-28) — 10/10 coding benchmark passed.**
+> The agentic coder loop runs via Studio's own built-in coder. Option B (isolated)
+> remains built-but-not-wired, for untrusted autonomous work. This records the
+> finding + both paths so nobody re-investigates from scratch. Last updated 2026-06-28.
+>
+> **Benchmark:** `coder/bench/bench.py` drove Studio's agentic coder (Ornith +
+> `enable_tools`) on 10 problems (is_prime, merge_intervals, two_sum, valid_parens,
+> fibonacci, binary_search, word_count, reverse_words, gcd, flatten). Each solution
+> was **independently verified** (our own asserts run against the model's file, not
+> its self-report): **10/10 PASS**, ~25 s/problem. Results: `coder/bench/RESULTS-2026-06-28.log`.
 
 ## Goal
 Let the generalist Hermes model delegate coding tasks to a specialist
@@ -48,11 +55,14 @@ Hardened, but **not a real jail** (`studio/backend/core/inference/tools.py`):
 - ❌ **No uid/mount namespace** (code: "out of scope"). It runs as `elias`, so commands
   using **absolute paths** can still read/write real files (`/home/elias/…`, Obsidian, `~/.ssh`).
 
-## The decision
-Studio chat tools stay **ON** → the coder is parked. Two ways to finish it later:
+## The decision — Option A (in use), Option B (for untrusted work)
+Studio chat tools stay **ON**. The lean agentic loop is **Option A**, now validated:
 
-- **Option A — Studio's own agentic coder.** One place, nothing new (Studio chat
-  *is* a coding agent). ❌ host-side sandbox — can touch your files (see above).
+- **Option A — Studio's own agentic coder. ✅ CONFIRMED WORKING (10/10 benchmark).**
+  POST `127.0.0.1:8888/v1/chat/completions` with `enable_tools:true` + Ornith loaded
+  → it writes a file, runs `python3`, loops/fixes in `~/studio_sandbox` until correct.
+  Lean: **no LiteLLM, no OpenCode**. ❌ host-side sandbox — can touch your files (see
+  above), so keep it to trusted/benign tasks.
 - **Option B — file-safe OpenCode.** OpenCode + the isolated `hermes-container`
   (uid 1000, **no host FS**) + a **separate raw `llama-server`** for Ornith (the
   same llama.cpp engine Studio spawns, minus the agentic wrapper → clean
