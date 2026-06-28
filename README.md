@@ -54,13 +54,13 @@ idle-unloads it. So the generalist (Qwen 3.6 35B-A3B MTP) and the coding special
 - systemd units for both.
 
 ### `coder/` — agentic coding sandbox (the Hermes "code" specialist)
-> ✅ **The agentic coder loop is CONFIRMED WORKING via option A** (Studio's own
-> built-in coder: `enable_tools` + Ornith → writes/runs/loops in `studio_sandbox`) —
-> **10/10 coding benchmark passed** (`coder/bench/`). Lean: no LiteLLM, no OpenCode.
-> Tradeoff: that sandbox is host-side. **These `coder/` pieces are the file-safe
-> *option B*** (OpenCode + this isolated container + a separate raw `llama-server`) for
-> turning the loop loose on **untrusted** work — built and ready, not yet wired.
-> Full finding + both paths: **[docs/CODER_BACKEND.md](docs/CODER_BACKEND.md)**.
+> ✅ **The supervised agentic coder is BUILT + validated** (option B): a two-tier system
+> — **Hermes/Qwen manager** clarifies + delegates + supervises, **OpenCode + Ornith coder**
+> does method-granular **TDD** in an isolated sandbox, then it's **run** (sibling container,
+> `127.0.0.1`) and UI-checked by Qwen's vision. See **[coder/README.md](coder/README.md)**
+> for the platform and **[docs/CODER_BACKEND.md](docs/CODER_BACKEND.md)** for why a raw
+> `llama-server` (not Studio). A quick proof that Ornith codes well also lives in `coder/bench/`
+> (10/10 via Studio's own loop).
 
 - **`hermes-container`** — a **bounded** docker lifecycle wrapper. hermesbot runs *only*
   this (via sudoers) and gets **no direct docker**: every op is fenced to containers

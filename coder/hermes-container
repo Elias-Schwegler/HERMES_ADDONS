@@ -65,6 +65,24 @@ case "$verb" in
     [ "$#" -gt 0 ] || die "exec needs a command"
     exec docker exec "$c" "$@"   # runs INSIDE the isolated sandbox
     ;;
+  runapp)
+    # role=run sibling: runs the BUILT app with a 127.0.0.1-only port map (off-LAN).
+    # Reuses the project's /work. Same fence (managed label, capped, non-root, no host FS).
+    valid_project "${2:-}"; p="$2"; portmap="${3:-}"; shift 3 2>/dev/null || die "usage: runapp <project> <hostport>:<ctrport> <cmd...>"
+    [[ "$portmap" =~ ^[0-9]{2,5}:[0-9]{2,5}$ ]] || die "bad portmap '$portmap' (want hostport:ctrport)"
+    [ "$#" -gt 0 ] || die "runapp needs a command"
+    rcn=$(cname "run-$p")
+    if docker inspect "$rcn" >/dev/null 2>&1; then assert_managed "$rcn"; docker rm -f "$rcn" >/dev/null; fi
+    docker run -d --name "$rcn" \
+      --label "$NS.managed=1" --label "$NS.project=$p" --label "$NS.role=run" \
+      --network bridge --add-host host.docker.internal:host-gateway \
+      --memory "$MEM" --cpus "$CPUS" --pids-limit "$PIDS" \
+      --security-opt no-new-privileges --restart no \
+      -p "127.0.0.1:${portmap%%:*}:${portmap##*:}" \
+      -v "$DATA_ROOT/$p:/work" -w /work \
+      "$IMAGE" "$@" >/dev/null
+    echo "running $rcn on http://127.0.0.1:${portmap%%:*}"
+    ;;
   list)  docker ps -a --filter "label=$NS.managed=1" \
            --format 'table {{.Names}}\t{{.Status}}\t{{.Label "'"$NS"'.role"}}' ;;
   deploy)
@@ -73,13 +91,13 @@ case "$verb" in
     echo "marked $c deployed (exempt from gc)"
     ;;
   gc)
-    # remove role=dev managed containers NOT in the deploy list. Never touches non-managed.
-    docker ps -a --filter "label=$NS.managed=1" --filter "label=$NS.role=dev" --format '{{.Names}}' \
+    # remove managed containers (dev + run) NOT in the deploy list. Never touches non-managed.
+    docker ps -a --filter "label=$NS.managed=1" --format '{{.Names}}' \
     | while read -r c; do
         [ -n "$c" ] || continue
         grep -qxF "$c" "$DEPLOY_LIST" 2>/dev/null && continue
         if assert_managed "$c" 2>/dev/null; then docker rm -f "$c" >/dev/null && echo "gc removed $c"; fi
       done
     ;;
-  *) die "usage: hermes-container {create|start|stop|rm|exec|logs|list|deploy|gc} <project> [args]" ;;
+  *) die "usage: hermes-container {create|start|stop|rm|exec|logs|runapp|list|deploy|gc} <project> [args]" ;;
 esac

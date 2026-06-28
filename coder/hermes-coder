@@ -96,8 +96,46 @@ EOF
     if [ "$gate" -eq 0 ] && [ "$tests" -eq 0 ]; then echo "REVIEW=PASS"; else echo "REVIEW=FAIL (anti_stub=$gate tests=$tests)"; exit 1; fi
     ;;
 
+  run)
+    # Execute the validated app. The CODER (it knows the code) writes runspec.json;
+    # the HOST wrapper runs it in a role=run sibling with a 127.0.0.1-only port.
+    vp "${2:-}"; p="$2"; ensure_model; d="$(pdir "$p")"
+    rm -f "$d/runspec.json"
+    ocrun "$p" "Write runspec.json describing how to run this app, as JSON: {\"kind\":\"web\" or \"cli\", \"cmd\":\"<shell command to start it; for web bind 0.0.0.0:PORT>\", \"port\":<int or null>}. Verify the command actually starts the app before finishing."
+    [ -f "$d/runspec.json" ] || die "coder produced no runspec.json"
+    kind=$(python3 -c "import json;print(json.load(open('$d/runspec.json')).get('kind','cli'))" 2>/dev/null)
+    cmd=$(python3 -c "import json;print(json.load(open('$d/runspec.json')).get('cmd',''))" 2>/dev/null)
+    port=$(python3 -c "import json;v=json.load(open('$d/runspec.json')).get('port');print(v or '')" 2>/dev/null)
+    [ -n "$cmd" ] || die "runspec.json has no cmd"
+    if [ "$kind" = web ] && [ -n "$port" ]; then
+      hp=$(( (RANDOM % 1000) + 18000 ))
+      "$HC" runapp "$p" "$hp:$port" bash -lc "$cmd"
+      local_up=""; for i in $(seq 1 30); do curl -s -m2 "http://127.0.0.1:$hp" >/dev/null 2>&1 && { local_up=1; break; }; sleep 1; done
+      [ -n "$local_up" ] && echo "RUN: app live at http://127.0.0.1:$hp (off-LAN)" || echo "RUN: started but http://127.0.0.1:$hp not responding yet"
+      if command -v chromium >/dev/null 2>&1 && [ -n "$local_up" ]; then
+        echo "=== UI vision check (manager's eyes: Qwen vision) ==="
+        python3 "$SHARE/vision/ui_check.py" "http://127.0.0.1:$hp" "$d/spec.md" "$d/ui_shot.png" \
+          || echo "  (vision flagged issues — manager should review the screenshot)"
+      fi
+    else
+      echo "RUN (cli): executing once in the sandbox"
+      "$HC" exec "$p" env HOME=/work bash -lc "$cmd"
+    fi
+    ;;
+
+  present)
+    vp "${2:-}"; p="$2"; d="$(pdir "$p")"
+    echo "=== solution: $p ==="
+    echo "files:"; ls -1 "$d" 2>/dev/null | grep -vE '^\.(npm|cache|config|local|pytest_cache)$|^opencode\.json$'
+    ports=$(docker ps --filter "name=$(printf 'hermes-coder-run-%s' "$p")" --format '{{.Ports}}' 2>/dev/null)
+    [ -n "$ports" ] && echo "live at: $ports"
+    [ -f "$d/ui_shot.png" ] && echo "UI screenshot: $d/ui_shot.png"
+    [ -f "$d/PLAN.md" ] && { echo "--- plan tail ---"; tail -6 "$d/PLAN.md"; }
+    ;;
+
   finish)
     vp "${2:-}"; p="$2"
+    "$HC" rm "run-$p" 2>/dev/null || true   # tear down the run sibling (kept if deployed via gc list)
     # stop the model if no dev sandboxes are still running
     running=$("$HC" list 2>/dev/null | grep -c 'Up ' || true)
     [ "${running:-0}" -le 1 ] && systemctl stop "$LLAMA_SVC" 2>/dev/null && echo "model stopped (idle)" || echo "model kept (other sessions active)"
